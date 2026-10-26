@@ -55,31 +55,28 @@
         sdk.open(ref).catch(fail);
     }
 
-    // The filters and the selection live in the frame's own hash, so
-    // switching tabs away and back -- which unloads the page -- comes back to
-    // them.
+    // The search, the filters, the grouping, the drawer's width and the
+    // selection live in the frame's own hash, so a reload comes back to them.
+    // The kit also remembers all but the selection for this plugin and
+    // cluster, so switching tabs or clusters away and back -- which unloads
+    // the page -- comes back to them too.
     var REMEMBERED = ['group', 'status', 'namespace', 'node', 'selected', 'width'];
 
     function saveHash() {
-        var parts = [];
+        var values = { q: state.query };
         REMEMBERED.forEach(function (k) {
-            if (state[k] && !(k === 'group' && state[k] === 'state')) parts.push(k + '=' + encodeURIComponent(state[k]));
+            values[k] = k === 'group' && state[k] === 'state' ? '' : state[k];
         });
-        try {
-            history.replaceState(null, '', '#' + parts.join('&'));
-        } catch (e) {
-            // A sandboxed frame may refuse; the board still works.
-        }
+        K.writeHash(values);
     }
 
     function loadHash() {
-        (location.hash || '')
-            .replace(/^#/, '')
-            .split('&')
-            .forEach(function (pair) {
-                var cut = pair.indexOf('=');
-                if (cut > 0 && REMEMBERED.indexOf(pair.slice(0, cut)) >= 0) state[pair.slice(0, cut)] = decodeURIComponent(pair.slice(cut + 1));
-            });
+        var hash = K.readHash();
+        REMEMBERED.forEach(function (k) {
+            if (hash[k]) state[k] = hash[k];
+        });
+        state.query = hash.q || '';
+        $('query').value = state.query;
         if (!GROUPINGS.some(function (g) {
             return g.id === state.group;
         })) state.group = 'state';
@@ -860,6 +857,7 @@
     $('search-icon').appendChild(K.icon('search'));
     $('query').addEventListener('input', function (event) {
         state.query = event.target.value;
+        saveHash();
         if (state.model && state.model.installed) drawGroups(state.model);
     });
     $('scrim').addEventListener('click', function () {
@@ -886,31 +884,35 @@
         return m && (m.reason || m.moving) ? K.describeMachine(m, into) : false;
     });
 
-    loadHash();
-    drawGroupControl();
-    // The drawer is as wide as it was left: the width is kept in the hash
-    // with the rest of the board's state.
-    document.body.appendChild(
-        K.grip({
-            panel: $('drawer'),
-            prop: '--drawer-w',
-            className: 'drawer-grip',
-            min: 380,
-            room: 360,
-            initial: Number(state.width) || 0,
-            label: 'Resize the machine drawer',
-            onResize: function (px, done) {
-                if (!done) return;
-                state.width = px ? String(px) : '';
-                saveHash();
-            },
-        }),
-    );
-
     sdk.ready()
         .then(function (context) {
             state.ctx = context;
             $('where').textContent = context.contextName;
+            // What the user last picked here, on this cluster, before the
+            // first draw.
+            return K.restoreView('machines');
+        })
+        .then(function () {
+            loadHash();
+            drawGroupControl();
+            // The drawer is as wide as it was left: the width is kept in the
+            // hash with the rest of the board's state.
+            document.body.appendChild(
+                K.grip({
+                    panel: $('drawer'),
+                    prop: '--drawer-w',
+                    className: 'drawer-grip',
+                    min: 380,
+                    room: 360,
+                    initial: Number(state.width) || 0,
+                    label: 'Resize the machine drawer',
+                    onResize: function (px, done) {
+                        if (!done) return;
+                        state.width = px ? String(px) : '';
+                        saveHash();
+                    },
+                }),
+            );
             tick();
         })
         .catch(fail);

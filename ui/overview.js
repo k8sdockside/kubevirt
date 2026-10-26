@@ -44,6 +44,17 @@
         open({ kind: M.KINDS.nodes, namespace: '', name: name });
     }
 
+    // Whether every machine that needs a look is listed lives in the frame's
+    // hash, which the kit also remembers for this plugin and cluster -- so
+    // switching tabs or clusters away and back comes back to it.
+    function saveHash() {
+        K.writeHash({ needs: state.needsAll ? 'all' : '' });
+    }
+
+    function loadHash() {
+        state.needsAll = K.readHash().needs === 'all';
+    }
+
     function byKey(key) {
         return (
             (state.model &&
@@ -344,6 +355,7 @@
                 box.appendChild(
                     K.button(state.needsAll ? 'Show fewer' : 'Show all ' + list.length, 'ghost small', state.needsAll ? 'close' : 'arrow', function () {
                         state.needsAll = !state.needsAll;
+                        saveHash();
                         drawNeeds(state.model, true);
                     }),
                 );
@@ -822,6 +834,12 @@
     sdk.ready()
         .then(function (context) {
             state.ctx = context;
+            // What the user last picked here, on this cluster, before the
+            // first draw.
+            return K.restoreView('overview');
+        })
+        .then(function () {
+            loadHash();
             every(POLL, function () {
                 return M.load(sdk).then(function (model) {
                     $('error').hidden = true;

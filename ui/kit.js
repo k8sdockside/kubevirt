@@ -1,7 +1,8 @@
 // The drawing kit the KubeVirt pages share: icons, chips and buttons, the
 // honeycomb of machines, the machine's "screen" badge, meters, the tooltip,
-// the charts, and the guard that keeps a poll from redrawing whatever is
-// under the user's pointer.
+// the charts, the guard that keeps a poll from redrawing whatever is under
+// the user's pointer, the page state each view remembers per cluster, and the
+// table that sorts and filters by any column.
 //
 // Everything that came from the cluster is written with textContent, never
 // innerHTML: the frame is sandboxed, but a page that let a machine's name run
@@ -75,6 +76,10 @@
         lock: ['M6 11h12v9H6z', 'M8.5 11V8a3.5 3.5 0 0 1 7 0v3'],
         agent: ['M8 4h8v5H8z', 'M5 9h14v11H5z', 'M9 13h.01', 'M15 13h.01', 'M9.5 17h5'],
         settings: ['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3.9a7 7 0 0 0-2.1-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2.1 1.2l-2.3-.9-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-.9a7 7 0 0 0 2.1 1.2L10 21h4l.5-2.6a7 7 0 0 0 2.1-1.2l2.3.9 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z'],
+        rows: ['M4 5h16', 'M4 10h16', 'M4 15h16', 'M4 20h16'],
+        sort: ['M8 4v16', 'M4.5 7.5 8 4l3.5 3.5', 'M16 20V4', 'M12.5 16.5 16 20l3.5-3.5'],
+        'chevron-up': ['M6 14.5l6-6 6 6'],
+        'chevron-down': ['M6 9.5l6 6 6-6'],
     };
 
     function icon(name, className) {
@@ -673,6 +678,454 @@
         return node;
     }
 
+    // ----- remembering --------------------------------------------------------
+
+    // The app's per-plugin, per-cluster storage (0.0.19 and newer), with every
+    // failure swallowed: a page must work without it, keeping state in the hash.
+    var store = {
+        get: function (key) {
+            var bridge = window.k8sdockside;
+            if (!bridge || !bridge.storage) return Promise.resolve(null);
+            return Promise.resolve()
+                .then(function () {
+                    return bridge.storage.get(key);
+                })
+                .catch(function () {
+                    return null;
+                });
+        },
+        set: function (key, value) {
+            var bridge = window.k8sdockside;
+            if (!bridge || !bridge.storage) return Promise.resolve();
+            return Promise.resolve()
+                .then(function () {
+                    return bridge.storage.set(key, value);
+                })
+                .catch(function () {
+                    // Kept in the hash only.
+                });
+        },
+        remove: function (key) {
+            var bridge = window.k8sdockside;
+            if (!bridge || !bridge.storage) return Promise.resolve();
+            return Promise.resolve()
+                .then(function () {
+                    return bridge.storage.remove(key);
+                })
+                .catch(function () {
+                    // Nothing to do.
+                });
+        },
+    };
+
+    // What the user picked -- a sort, a filter, a search, an open row -- is
+    // kept in the frame's hash, so a reload of the frame keeps it. Switching
+    // tabs or clusters does not: the app loads the page afresh, without a
+    // hash, so the hash is also remembered in the app's storage (per plugin
+    // and per cluster) and put back by restoreView.
+    function readHash() {
+        var out = {};
+        (location.hash || '')
+            .replace(/^#/, '')
+            .split('&')
+            .forEach(function (pair) {
+                var cut = pair.indexOf('=');
+                if (cut <= 0) return;
+                try {
+                    out[pair.slice(0, cut)] = decodeURIComponent(pair.slice(cut + 1));
+                } catch (e) {
+                    // A mangled value is left out.
+                }
+            });
+        return out;
+    }
+
+    // values: { key: text }; an empty, false or missing value is left out.
+    function writeHash(values) {
+        var kept = Object.keys(values)
+            .filter(function (k) {
+                return typeof values[k] === 'string' && values[k] !== '';
+            })
+            .map(function (k) {
+                return [k, values[k]];
+            });
+        remember(kept);
+        var text = kept
+            .map(function (kv) {
+                return kv[0] + '=' + encodeURIComponent(kv[1]);
+            })
+            .join('&');
+        var hash = text ? '#' + text : '';
+        if (hash === location.hash || (!hash && !location.hash)) return;
+        try {
+            history.replaceState(null, '', hash || location.pathname + location.search);
+        } catch (e) {
+            // A sandboxed frame may refuse; the page still works.
+            try {
+                location.hash = text;
+            } catch (e2) {
+                // Kept in memory only.
+            }
+        }
+    }
+
+    // Keys that point at one object -- the machine whose drawer is open -- are
+    // not remembered: coming back to a tab should bring back the search and
+    // the filters, not reopen whatever was last looked at, which may be gone
+    // by then.
+    var FORGOTTEN = ['selected'];
+    // How long typing may pause before what was typed is written to storage.
+    var REMEMBER_AFTER_MS = 400;
+
+    var viewKey = '';
+    var rememberTimer = null;
+
+    function remember(entries) {
+        if (!viewKey) return;
+        var key = viewKey;
+        var value = {};
+        entries.forEach(function (kv) {
+            if (FORGOTTEN.indexOf(kv[0]) < 0) value[kv[0]] = kv[1];
+        });
+        clearTimeout(rememberTimer);
+        rememberTimer = setTimeout(function () {
+            if (Object.keys(value).length) store.set(key, value);
+            else store.remove(key);
+        }, REMEMBER_AFTER_MS);
+    }
+
+    // Puts back what the user last picked on this view, when the page was
+    // opened without a hash of its own; a hash that is there -- a reload --
+    // wins over what was remembered. From here on, every writeHash is
+    // remembered under this view. Call it once sdk.ready() has answered, and
+    // read the hash after it settles.
+    function restoreView(view) {
+        viewKey = 'view:' + view;
+        if (location.hash.replace(/^#/, '')) return Promise.resolve();
+        return store.get(viewKey).then(function (saved) {
+            if (!saved || typeof saved !== 'object') return;
+            var values = {};
+            Object.keys(saved).forEach(function (k) {
+                if (typeof saved[k] === 'string' && FORGOTTEN.indexOf(k) < 0) values[k] = saved[k];
+            });
+            writeHash(values);
+        });
+    }
+
+    // Redraws a region, putting keyboard focus back on the element that had
+    // it -- found again by its data-focus key -- with the caret where it was,
+    // so typing in a filter that redraws its own table goes on uninterrupted.
+    // Scroll positions inside the region that carry data-scroll are kept too.
+    function keepFocus(region, redraw) {
+        var active = document.activeElement;
+        var key = active && region.contains(active) && active.dataset ? active.dataset.focus : '';
+        var caret = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') ? { start: active.selectionStart, end: active.selectionEnd } : null;
+        var scrolls = {};
+        region.querySelectorAll('[data-scroll]').forEach(function (n) {
+            scrolls[n.dataset.scroll] = [n.scrollLeft, n.scrollTop];
+        });
+        redraw();
+        region.querySelectorAll('[data-scroll]').forEach(function (n) {
+            var at = scrolls[n.dataset.scroll];
+            if (!at) return;
+            n.scrollLeft = at[0];
+            n.scrollTop = at[1];
+        });
+        if (!key) return;
+        var again = Array.prototype.find.call(region.querySelectorAll('[data-focus]'), function (n) {
+            return n.dataset.focus === key;
+        });
+        if (!again) return;
+        again.focus({ preventScroll: true });
+        if (caret && caret.start !== null && (again.tagName === 'INPUT' || again.tagName === 'TEXTAREA')) {
+            try {
+                again.setSelectionRange(caret.start, caret.end === null ? caret.start : caret.end);
+            } catch (e) {
+                // A field without a caret; focus is enough.
+            }
+        }
+    }
+
+    // ----- the table -----------------------------------------------------------
+
+    // One table for a list: any column sorts, any column filters -- a text box
+    // under its header, or a pick list for a column with a handful of values --
+    // and a row can open in place. The page keeps the table's state in its
+    // hash, which restoreView remembers, so coming back to a tab brings the
+    // table back as it was left.
+    //
+    // A column: { id, label, className, title, sort(row), filter(row), pick, cell(row) }
+    //   sort    what the column sorts by: numbers as numbers, text as a
+    //           person reads it; left out, it does not sort
+    //   filter  the text its filter matches; left out, the column has no filter
+    //   pick    filter by picking one of the column's values rather than typing
+    //   cell    a node, a string, or an array of them
+    //
+    // Table state: { sort, desc, filters: { columnId: text } }
+
+    // The table's state from the hash: sort, desc, and f.<column> per filter.
+    // prefix keeps two tables' keys apart; the defaults fill what is not there.
+    function readTable(hash, prefix, sort, desc) {
+        prefix = prefix || '';
+        var filters = {};
+        Object.keys(hash).forEach(function (k) {
+            if (k.indexOf(prefix + 'f.') === 0 && hash[k]) filters[k.slice(prefix.length + 2)] = hash[k];
+        });
+        var d = hash[prefix + 'desc'];
+        return { sort: hash[prefix + 'sort'] || sort, desc: d ? d === '1' : desc, filters: filters };
+    }
+
+    // The table's state for the hash, leaving out what is the default.
+    function tableHash(state, prefix, sort, desc) {
+        prefix = prefix || '';
+        var out = {};
+        out[prefix + 'sort'] = state.sort === sort ? '' : state.sort;
+        out[prefix + 'desc'] = state.desc === desc ? '' : state.desc ? '1' : '0';
+        Object.keys(state.filters).forEach(function (k) {
+            if (state.filters[k]) out[prefix + 'f.' + k] = state.filters[k];
+        });
+        return out;
+    }
+
+    function filtering(state) {
+        return Object.keys(state.filters).some(function (k) {
+            return !!state.filters[k];
+        });
+    }
+
+    // Empty last whichever way round, numbers as numbers, text with its
+    // numbers in order.
+    function compareKeys(a, b) {
+        var blankA = a === null || a === undefined || a === '';
+        var blankB = b === null || b === undefined || b === '';
+        if (blankA || blankB) return blankA === blankB ? 0 : blankA ? 1 : -1;
+        if (typeof a === 'number' && typeof b === 'number') return a - b;
+        return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+    }
+
+    // The rows every column filter lets through: a pick matches exactly, text
+    // anywhere, every word.
+    function filterRows(rows, columns, state) {
+        var active = columns.filter(function (c) {
+            return c.filter && state.filters[c.id];
+        });
+        if (!active.length) return rows.slice();
+        return rows.filter(function (row) {
+            return active.every(function (c) {
+                var want = state.filters[c.id];
+                var have = c.filter(row);
+                if (c.pick) return have === want;
+                var text = String(have || '').toLowerCase();
+                return want
+                    .toLowerCase()
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .every(function (w) {
+                        return text.indexOf(w) >= 0;
+                    });
+            });
+        });
+    }
+
+    // The rows in the column's order; tie decides between equals, always
+    // ascending.
+    function sortRows(rows, columns, state, tie) {
+        tie =
+            tie ||
+            function () {
+                return 0;
+            };
+        var col = columns.find(function (c) {
+            return c.id === state.sort && c.sort;
+        });
+        if (!col) return rows.sort(tie);
+        return rows.sort(function (a, b) {
+            var r = compareKeys(col.sort(a), col.sort(b));
+            return (state.desc ? -r : r) || tie(a, b);
+        });
+    }
+
+    function cellContent(td, content) {
+        (Array.isArray(content) ? content : [content]).forEach(function (c) {
+            add(td, c);
+        });
+        return td;
+    }
+
+    // opts: { columns, all, rows, key(row), state, onChange(), onOpen(row),
+    //         opened(id) -> bool, detail(row), rowClass(row), className, empty }
+    //   all       every row: the pick lists are made from these
+    //   rows      the rows to draw, already filtered and sorted
+    //   onChange  called after the user sorts or filters; the page saves and redraws
+    function dataTable(opts) {
+        var columns = opts.columns;
+        var state = opts.state;
+        var table = el('table', 'tbl dtable' + (opts.className ? ' ' + opts.className : ''));
+
+        var head = el('tr');
+        columns.forEach(function (col) {
+            var th = el('th', col.className || '');
+            if (col.title) th.title = col.title;
+            if (col.sort) {
+                var on = state.sort === col.id;
+                var b = el('button', 'th-sort' + (on ? ' on' : ''));
+                b.type = 'button';
+                b.dataset.focus = 'sort:' + col.id;
+                add(b, el('span', '', col.label), icon(on ? (state.desc ? 'chevron-down' : 'chevron-up') : 'sort', 'th-dir'));
+                b.setAttribute('aria-label', 'Sort by ' + col.label);
+                th.setAttribute('aria-sort', on ? (state.desc ? 'descending' : 'ascending') : 'none');
+                b.addEventListener('click', function () {
+                    if (state.sort === col.id) state.desc = !state.desc;
+                    else {
+                        state.sort = col.id;
+                        state.desc = false;
+                    }
+                    opts.onChange();
+                });
+                th.appendChild(b);
+            } else th.textContent = col.label;
+            head.appendChild(th);
+        });
+
+        var filters = el('tr', 'tbl-filters');
+        columns.forEach(function (col) {
+            var th = el('th', col.className || '');
+            if (col.filter) th.appendChild(filterControl(col, opts));
+            filters.appendChild(th);
+        });
+
+        var thead = el('thead');
+        add(thead, head, filters);
+        var tbody = el('tbody');
+        opts.rows.forEach(function (row) {
+            var id = opts.key(row);
+            var open = opts.opened ? opts.opened(id) : false;
+            var tr = el('tr', [opts.rowClass ? opts.rowClass(row) : '', opts.onOpen ? 'clickable' : '', open ? 'open' : ''].filter(Boolean).join(' '));
+            if (opts.onOpen) {
+                tr.tabIndex = 0;
+                tr.dataset.focus = 'row:' + id;
+                tr.addEventListener('click', function (event) {
+                    // A button or link in the row does its own thing.
+                    if (event.target.closest('button, a, input, select')) return;
+                    opts.onOpen(row);
+                });
+                tr.addEventListener('keydown', function (event) {
+                    if (event.target !== tr) return;
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        opts.onOpen(row);
+                    }
+                });
+                if (opts.opened) tr.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
+            columns.forEach(function (col) {
+                tr.appendChild(cellContent(el('td', col.className || ''), col.cell(row)));
+            });
+            tbody.appendChild(tr);
+            if (open && opts.detail) {
+                var dr = el('tr', 'tbl-detail');
+                var td = el('td');
+                td.colSpan = columns.length;
+                add(td, opts.detail(row));
+                dr.appendChild(td);
+                tbody.appendChild(dr);
+            }
+        });
+        if (!opts.rows.length) {
+            var none = el('tr', 'tbl-none');
+            var td = el('td', 'faint', opts.empty || 'Nothing matches these filters.');
+            td.colSpan = columns.length;
+            none.appendChild(td);
+            tbody.appendChild(none);
+        }
+        add(table, thead, tbody);
+        var wrap = el('div', 'tbl-wrap');
+        wrap.dataset.scroll = 'table';
+        wrap.appendChild(table);
+        return wrap;
+    }
+
+    function filterControl(col, opts) {
+        var value = opts.state.filters[col.id] || '';
+        function set(v) {
+            if (v) opts.state.filters[col.id] = v;
+            else delete opts.state.filters[col.id];
+            opts.onChange();
+        }
+        if (col.pick) {
+            var seen = {};
+            var values = [];
+            opts.all.forEach(function (r) {
+                var v = col.filter(r);
+                if (v && !seen[v]) {
+                    seen[v] = true;
+                    values.push(v);
+                }
+            });
+            values.sort(compareKeys);
+            if (value && values.indexOf(value) < 0) values.unshift(value);
+            var s = el('select', 'tf-select' + (value ? ' on' : ''));
+            s.dataset.focus = 'tf:' + col.id;
+            s.setAttribute('aria-label', 'Filter ' + col.label);
+            var any = el('option', '', 'any');
+            any.value = '';
+            s.appendChild(any);
+            values.forEach(function (v) {
+                var o = el('option', '', v);
+                o.value = v;
+                o.selected = v === value;
+                s.appendChild(o);
+            });
+            s.addEventListener('change', function () {
+                set(s.value);
+            });
+            return s;
+        }
+        var input = el('input', 'tf-input' + (value ? ' on' : ''));
+        input.type = 'search';
+        input.value = value;
+        input.placeholder = 'filter';
+        input.autocomplete = 'off';
+        input.spellcheck = false;
+        input.dataset.focus = 'tf:' + col.id;
+        input.setAttribute('aria-label', 'Filter ' + col.label);
+        input.addEventListener('input', function () {
+            set(input.value);
+        });
+        return input;
+    }
+
+    // "Clear column filters", for a page's toolbar, when any is set.
+    function clearFilters(state, onChange) {
+        if (!filtering(state)) return null;
+        var b = button('Clear column filters', 'ghost small', 'close', function () {
+            state.filters = {};
+            onChange();
+        });
+        b.dataset.focus = 'tf-clear';
+        return b;
+    }
+
+    // The two-button switch between cards and a table.
+    function layoutSwitch(current, onPick) {
+        var group = el('div', 'segmented layout-switch');
+        group.setAttribute('role', 'group');
+        group.setAttribute('aria-label', 'Show as');
+        [
+            ['cards', 'Cards', 'grid'],
+            ['table', 'Table', 'rows'],
+        ].forEach(function (it) {
+            var b = button(it[1], current === it[0] ? 'on' : '', it[2], function () {
+                if (current !== it[0]) onPick(it[0]);
+            });
+            b.dataset.focus = 'layout:' + it[0];
+            b.setAttribute('aria-pressed', current === it[0] ? 'true' : 'false');
+            b.title = 'Show as ' + it[1].toLowerCase();
+            group.appendChild(b);
+        });
+        return group;
+    }
+
     window.KubeVirtKit = {
         el: el,
         add: add,
@@ -704,5 +1157,19 @@
         machineRef: machineRef,
         calm: calm,
         grip: grip,
+        store: store,
+        readHash: readHash,
+        writeHash: writeHash,
+        restoreView: restoreView,
+        keepFocus: keepFocus,
+        readTable: readTable,
+        tableHash: tableHash,
+        filtering: filtering,
+        compareKeys: compareKeys,
+        filterRows: filterRows,
+        sortRows: sortRows,
+        dataTable: dataTable,
+        clearFilters: clearFilters,
+        layoutSwitch: layoutSwitch,
     };
 })();

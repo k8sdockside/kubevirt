@@ -69,6 +69,32 @@ Plain HTML and script, no build step: the repository is the plugin.
 - Lone VirtualMachineInstances, with no VirtualMachine of their own, are on the
   board too.
 
+**Nodes** lists every node that runs guests or could, however many there are:
+
+- A bar of nodes by state — hosting guests, needing a look, idle — and how
+  many are ready and cordoned, and how much CPU and memory the guests have
+  asked for across them.
+- Each node as a card: whether it is ready, cordoned, under pressure or short
+  of CPU or memory, whether virt-handler runs there and has KVM, how much of
+  it the guests' launcher pods have asked for, and every guest on it. Open a
+  card for its OS, kernel, runtime, CPU model, allocatable, taints and a table
+  of its guests. Sort by guests, CPU, memory or name; filter to the ones that
+  need a look, are cordoned or have no guests; search by node, guest, version
+  or taint.
+- Or the same nodes as a **table**: node, roles, ready, scheduling (cordoned),
+  pressure, virt-handler, KVM, guest count, guests by name, guest vCPUs and
+  memory, CPU and memory asked for of what the node can allocate, kubelet and
+  age. Click any header to sort by it, again to turn the order round, and
+  narrow any column with the filter under its header. A row opens in place
+  into the same details as a card.
+
+Every page remembers how it was left — the search, the filters, the sort,
+cards or table, the table's column sorts and filters, the open rows, the
+drawer's width — per cluster, so switching tabs or clusters away and back
+comes back to it. It is kept in the page's address and in the app's storage
+for the plugin (K8s Dockside 0.0.19 and newer); the open machine drawer is
+not brought back, only the view around it.
+
 **Machine** panel in every VirtualMachine's detail view: its state and for how
 long, the button group of what can be done to it now, where it runs and its
 addresses, the migration in flight, its conditions and recent migrations.

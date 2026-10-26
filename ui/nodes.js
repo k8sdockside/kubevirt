@@ -2,7 +2,7 @@
 // first twelve the overview has room for. Each one with whether it is well,
 // what it runs (kubelet, OS, kernel, CPU model), how much of it the guests'
 // launcher pods have asked for, and every guest on it, which a row opens into
-// by name.
+// by name. As cards, or as a table that sorts and filters by any column.
 (function () {
     'use strict';
 
@@ -27,7 +27,21 @@
         { id: 'idle', label: 'No guests' },
     ];
 
-    var state = { ctx: null, model: null, sig: '', query: '', sort: 'guests', filter: '', open: '' };
+    // The table's own order, when the user has not picked one.
+    var TABLE_SORT = 'name';
+
+    var state = {
+        ctx: null,
+        model: null,
+        sig: '',
+        query: '',
+        sort: 'guests',
+        filter: '',
+        open: '',
+        // 'cards' or 'table'.
+        layout: 'cards',
+        table: { sort: TABLE_SORT, desc: false, filters: {} },
+    };
 
     var $ = function (id) {
         return document.getElementById(id);
@@ -46,36 +60,43 @@
         open({ kind: M.KINDS.nodes, namespace: '', name: name });
     }
 
-    // The sort, the filter and which rows are open live in the frame's hash,
-    // so switching tabs away and back comes back to them.
-    var REMEMBERED = ['sort', 'filter', 'open'];
-
+    // The search, the sort, the filter, which rows are open, cards or table
+    // and the table's own sort and column filters live in the frame's hash,
+    // which the kit also remembers for this plugin and cluster -- so
+    // switching tabs or clusters away and back comes back to them.
     function saveHash() {
-        var parts = [];
-        REMEMBERED.forEach(function (k) {
-            if (state[k] && !(k === 'sort' && state[k] === 'guests')) parts.push(k + '=' + encodeURIComponent(state[k]));
+        var values = {
+            q: state.query,
+            sort: state.sort === 'guests' ? '' : state.sort,
+            filter: state.filter,
+            open: state.open,
+            view: state.layout === 'table' ? 'table' : '',
+        };
+        var table = K.tableHash(state.table, 't', TABLE_SORT, false);
+        Object.keys(table).forEach(function (k) {
+            values[k] = table[k];
         });
-        try {
-            history.replaceState(null, '', '#' + parts.join('&'));
-        } catch (e) {
-            // A sandboxed frame may refuse; the page still works.
-        }
+        K.writeHash(values);
     }
 
     function loadHash() {
-        (location.hash || '')
-            .replace(/^#/, '')
-            .split('&')
-            .forEach(function (pair) {
-                var cut = pair.indexOf('=');
-                if (cut > 0 && REMEMBERED.indexOf(pair.slice(0, cut)) >= 0) state[pair.slice(0, cut)] = decodeURIComponent(pair.slice(cut + 1));
-            });
+        var hash = K.readHash();
+        state.query = hash.q || '';
+        state.sort = hash.sort || 'guests';
+        state.filter = hash.filter || '';
+        state.open = hash.open || '';
+        state.layout = hash.view === 'table' ? 'table' : 'cards';
+        state.table = K.readTable(hash, 't', TABLE_SORT, false);
         if (!SORTS.some(function (s) {
             return s.id === state.sort;
         })) state.sort = 'guests';
         if (!FILTERS.some(function (f) {
             return f.id === state.filter;
         })) state.filter = '';
+        if (!COLUMNS.some(function (c) {
+            return c.id === state.table.sort;
+        })) state.table.sort = TABLE_SORT;
+        $('query').value = state.query;
     }
 
     function openSet() {
@@ -285,6 +306,37 @@
         add(all, K.icon(everyOpen ? 'close' : 'grid'), el('span', '', everyOpen ? 'Collapse all' : 'Expand all'));
     }
 
+    // Cards or a table, and -- with the table -- the button that clears its
+    // column filters.
+    function drawTools() {
+        var table = state.layout === 'table';
+        $('sort').hidden = table;
+        var clear = $('tclear');
+        clear.textContent = '';
+        if (table) {
+            add(
+                clear,
+                K.clearFilters(state.table, function () {
+                    saveHash();
+                    drawTools();
+                    draw();
+                }),
+            );
+        }
+        var box = $('layout');
+        K.keepFocus(box, function () {
+            box.textContent = '';
+            box.appendChild(
+                K.layoutSwitch(state.layout, function (layout) {
+                    state.layout = layout;
+                    saveHash();
+                    drawTools();
+                    draw();
+                }),
+            );
+        });
+    }
+
     // ----- one node --------------------------------------------------------------
 
     function spec(n) {
@@ -390,15 +442,7 @@
     function row(n) {
         var expanded = isOpen(n.name);
         var issues = problems(n);
-        var worst = issues.some(function (p) {
-            return p.tone === 'error';
-        })
-            ? 'error'
-            : issues.some(function (p) {
-                  return p.tone === 'warn';
-              })
-            ? 'warn'
-            : '';
+        var worst = worstTone(n);
         var li = el('li', 'ncard' + (worst ? ' ' + worst : '') + (n.guests.length ? '' : ' idle') + (expanded ? ' open' : ''));
         li.dataset.node = n.name;
 
@@ -436,15 +480,350 @@
         return li;
     }
 
+    // ----- the table -------------------------------------------------------------
+
+    var HANDLER_TONE = { ready: 'ok', 'not ready': 'error', missing: 'error' };
+
+    function handlerText(n) {
+        return n.handler || 'unknown';
+    }
+
+    function kvmText(n) {
+        return n.known ? (n.kvm ? 'yes' : 'no') : 'unknown';
+    }
+
+    function pressureText(n) {
+        return n.pressure
+            .map(function (p) {
+                return p.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+            })
+            .join(', ');
+    }
+
+    // How much of a node its guests have asked for, as a short meter with the
+    // share and the amounts.
+    function askedCell(n, fraction, used, of) {
+        if (!(n.known && n.cpu)) return el('span', 'faint small', 'unknown');
+        var box = el('span', 'tmeter');
+        box.title = used + ' of ' + of + ' asked for by guests';
+        add(box, K.meter(fraction), el('span', 'meter-num ' + K.fillTone(fraction), K.percent(fraction)), el('span', 'meter-abs faint', used + ' / ' + of));
+        return box;
+    }
+
+    function guestNames(n) {
+        if (!n.guests.length) return el('span', 'faint small', 'none');
+        var box = el('span', 'tguests');
+        n.guests.forEach(function (m) {
+            var one = el('span', 'tguest');
+            var g = K.button('', 'guest ' + m.tone + ' g-' + m.group, null, function () {
+                open(K.machineRef(m));
+            });
+            g.dataset.key = m.key;
+            g.setAttribute('aria-label', m.name + ', ' + m.status);
+            var name = K.link(m.name, function () {
+                open(K.machineRef(m));
+            }, m.namespace + '/' + m.name + ' · ' + m.status);
+            add(one, g, name);
+            box.appendChild(one);
+        });
+        return box;
+    }
+
+    function capacityKnown(n) {
+        return n.known && n.cpu ? 1 : 0;
+    }
+
+    var COLUMNS = [
+        {
+            id: 'name',
+            label: 'Node',
+            className: 'nowrap',
+            sort: function (n) {
+                return n.name;
+            },
+            filter: function (n) {
+                return n.name;
+            },
+            cell: function (n) {
+                return K.link(n.name, function () {
+                    openNode(n.name);
+                }, 'Open ' + n.name + ' in the app');
+            },
+        },
+        {
+            id: 'roles',
+            label: 'Roles',
+            sort: function (n) {
+                return n.roles.join(', ');
+            },
+            filter: function (n) {
+                return n.roles.join(', ');
+            },
+            cell: function (n) {
+                return el('span', 'faint', n.roles.join(', '));
+            },
+        },
+        {
+            id: 'ready',
+            label: 'Ready',
+            title: 'Whether the kubelet reports Ready',
+            pick: true,
+            sort: function (n) {
+                return n.ready ? 1 : 0;
+            },
+            filter: function (n) {
+                return n.ready ? 'ready' : 'not ready';
+            },
+            cell: function (n) {
+                return n.ready ? K.chip('ready', 'ok', 'check') : K.chip('not ready', 'error', 'alert', n.readyWhy || 'The kubelet is not reporting Ready');
+            },
+        },
+        {
+            id: 'cordoned',
+            label: 'Scheduling',
+            title: 'Cordoned: no new guest will be placed here',
+            pick: true,
+            sort: function (n) {
+                return n.cordoned ? 0 : 1;
+            },
+            filter: function (n) {
+                return n.cordoned ? 'cordoned' : 'schedulable';
+            },
+            cell: function (n) {
+                return n.cordoned ? K.chip('cordoned', 'warn', 'lock', 'No new guest will be placed here') : el('span', 'faint', 'schedulable');
+            },
+        },
+        {
+            id: 'pressure',
+            label: 'Pressure',
+            title: 'Memory, disk or PID pressure the node reports',
+            sort: pressureText,
+            filter: pressureText,
+            cell: function (n) {
+                if (!n.pressure.length) return el('span', 'faint', '—');
+                var box = el('span', 'cell-chips');
+                n.pressure.forEach(function (p) {
+                    box.appendChild(K.chip(p.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase(), 'warn', 'alert', 'The node reports ' + p));
+                });
+                return box;
+            },
+        },
+        {
+            id: 'handler',
+            label: 'virt-handler',
+            title: 'Whether a virt-handler pod runs here and is ready: no guest can start on a node without one',
+            pick: true,
+            sort: handlerText,
+            filter: handlerText,
+            cell: function (n) {
+                return n.handler ? K.chip(n.handler, HANDLER_TONE[n.handler] || 'muted', n.handler === 'ready' ? 'check' : 'alert') : el('span', 'faint', 'unknown');
+            },
+        },
+        {
+            id: 'kvm',
+            label: 'KVM',
+            title: 'Whether the node offers /dev/kvm; without it guests run under software emulation',
+            pick: true,
+            sort: kvmText,
+            filter: kvmText,
+            cell: function (n) {
+                if (!n.known) return el('span', 'faint', 'unknown');
+                return n.kvm ? el('span', '', 'yes') : K.chip('no', 'muted', 'bolt', 'Guests here run under software emulation, which is slow');
+            },
+        },
+        {
+            id: 'guests',
+            label: 'Guests',
+            className: 'num',
+            sort: function (n) {
+                return n.guests.length;
+            },
+            filter: function (n) {
+                return String(n.guests.length);
+            },
+            cell: function (n) {
+                return String(n.guests.length);
+            },
+        },
+        {
+            id: 'names',
+            label: 'Guests by name',
+            sort: function (n) {
+                return n.guests
+                    .map(function (m) {
+                        return m.name;
+                    })
+                    .sort()
+                    .join(',');
+            },
+            filter: function (n) {
+                return n.guests
+                    .map(function (m) {
+                        return m.namespace + '/' + m.name + ' ' + m.status;
+                    })
+                    .join(' ');
+            },
+            cell: guestNames,
+        },
+        {
+            id: 'vcpus',
+            label: 'vCPUs',
+            className: 'num',
+            title: 'The vCPUs of the guests on this node',
+            sort: function (n) {
+                return n.vcpus;
+            },
+            filter: function (n) {
+                return String(n.vcpus);
+            },
+            cell: function (n) {
+                return String(n.vcpus);
+            },
+        },
+        {
+            id: 'gmemory',
+            label: 'Guest memory',
+            className: 'num nowrap',
+            title: 'The memory of the guests on this node',
+            sort: function (n) {
+                return n.guestMemory;
+            },
+            filter: function (n) {
+                return n.guestMemory ? M.bytes(n.guestMemory) : '';
+            },
+            cell: function (n) {
+                return n.guestMemory ? M.bytes(n.guestMemory) : '—';
+            },
+        },
+        {
+            id: 'cpu',
+            label: 'CPU asked for',
+            className: 'nowrap',
+            title: 'Cores the guests’ launcher pods have asked for, of what the node can allocate',
+            sort: function (n) {
+                return capacityKnown(n) ? n.cpuFraction : null;
+            },
+            filter: function (n) {
+                return capacityKnown(n) ? K.percent(n.cpuFraction) + ' ' + M.cores(n.requested.cpu) + ' / ' + M.cores(n.cpu) : 'unknown';
+            },
+            cell: function (n) {
+                return askedCell(n, n.cpuFraction, M.cores(n.requested.cpu), M.cores(n.cpu));
+            },
+        },
+        {
+            id: 'memory',
+            label: 'Memory asked for',
+            className: 'nowrap',
+            title: 'Memory the guests’ launcher pods have asked for, of what the node can allocate',
+            sort: function (n) {
+                return capacityKnown(n) ? n.memoryFraction : null;
+            },
+            filter: function (n) {
+                return capacityKnown(n) ? K.percent(n.memoryFraction) + ' ' + M.bytes(n.requested.memory) + ' / ' + M.bytes(n.memory) : 'unknown';
+            },
+            cell: function (n) {
+                return askedCell(n, n.memoryFraction, M.bytes(n.requested.memory), M.bytes(n.memory));
+            },
+        },
+        {
+            id: 'kubelet',
+            label: 'Kubelet',
+            className: 'nowrap',
+            pick: true,
+            sort: function (n) {
+                return n.kubelet;
+            },
+            filter: function (n) {
+                return n.kubelet;
+            },
+            cell: function (n) {
+                return el('span', 'faint', n.kubelet);
+            },
+        },
+        {
+            id: 'age',
+            label: 'Age',
+            className: 'nowrap',
+            // Youngest first when ascending, as the ages read.
+            sort: function (n) {
+                return n.created ? -n.created : null;
+            },
+            filter: function (n) {
+                return n.created ? K.span(n.created) : '';
+            },
+            cell: function (n) {
+                return el('span', 'faint', n.created ? K.span(n.created) : '');
+            },
+        },
+    ];
+
+    function worstTone(n) {
+        var issues = problems(n);
+        if (issues.some(function (p) {
+            return p.tone === 'error';
+        })) return 'error';
+        if (issues.some(function (p) {
+            return p.tone === 'warn';
+        })) return 'warn';
+        return '';
+    }
+
+    function drawTable(model, nodes) {
+        var box = $('ntable');
+        K.keepFocus(box, function () {
+            box.textContent = '';
+            var rows = K.sortRows(K.filterRows(nodes, COLUMNS, state.table), COLUMNS, state.table, function (a, b) {
+                return a.name.localeCompare(b.name, undefined, { numeric: true });
+            });
+            box.appendChild(
+                K.dataTable({
+                    columns: COLUMNS,
+                    all: model.nodes,
+                    rows: rows,
+                    key: function (n) {
+                        return n.name;
+                    },
+                    state: state.table,
+                    onChange: function () {
+                        saveHash();
+                        drawTools();
+                        draw();
+                    },
+                    onOpen: function (n) {
+                        toggle(n.name);
+                    },
+                    opened: isOpen,
+                    detail: function (n) {
+                        var more = el('div', 'nmore');
+                        add(more, facts(n), guestTable(n));
+                        return more;
+                    },
+                    rowClass: worstTone,
+                    className: 'nodes-table',
+                    empty: nodes.length ? 'No node matches these column filters.' : 'No node matches.',
+                }),
+            );
+        });
+    }
+
     // ----- putting it together ---------------------------------------------------
 
     function draw() {
         var model = state.model;
         if (!model || !model.installed) return;
         drawFilter(model);
+        var table = state.layout === 'table' && model.nodes.length > 0;
         var list = $('nlist');
-        list.textContent = '';
+        list.hidden = table;
+        $('ntable').hidden = !table;
         var nodes = shown(model);
+        if (table) {
+            list.textContent = '';
+            drawTable(model, nodes);
+            return;
+        }
+        $('ntable').textContent = '';
+        list.textContent = '';
         if (!model.nodes.length) {
             list.appendChild(el('li', 'quiet', model.nodesKnown ? 'No node is marked kubevirt.io/schedulable and no guest is running. virt-handler labels the nodes it can run guests on.' : 'Nodes could not be read, and no guest is running.'));
             return;
@@ -490,7 +869,8 @@
         K.calm($('nstrip'), function () {
             drawStrip(state.model);
         });
-        K.calm($('nlist'), draw);
+        // Held while the user points at or types in whichever is shown.
+        K.calm(state.layout === 'table' ? $('ntable') : $('nlist'), draw);
     }
 
     var timer = null;
@@ -518,6 +898,7 @@
     $('search-icon').appendChild(K.icon('search'));
     $('query').addEventListener('input', function (event) {
         state.query = event.target.value;
+        saveHash();
         draw();
     });
     $('expand-all').addEventListener('click', function () {
@@ -531,20 +912,27 @@
             $('query').focus();
         }
     });
-    K.tooltip($('nlist'), '.guest', function (g, into) {
+    function describeGuest(g, into) {
         var m = state.model && state.model.machines.find(function (x) {
             return x.key === g.dataset.key;
         });
         return m ? K.describeMachine(m, into) : false;
-    });
-
-    loadHash();
-    drawSort();
+    }
+    K.tooltip($('nlist'), '.guest', describeGuest);
+    K.tooltip($('ntable'), '.guest', describeGuest);
 
     sdk.ready()
         .then(function (context) {
             state.ctx = context;
             $('where').textContent = context.contextName;
+            // What the user last picked here, on this cluster, before the
+            // first draw.
+            return K.restoreView('nodes');
+        })
+        .then(function () {
+            loadHash();
+            drawSort();
+            drawTools();
             tick();
         })
         .catch(fail);
