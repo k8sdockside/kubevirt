@@ -3,7 +3,7 @@
     "id": "kubevirt",
     "name": "KubeVirt",
     "version": "1.0.0",
-    "minAppVersion": "0.0.30",
+    "minAppVersion": "0.1.36",
     "author": "K8s Dockside",
     "tagline": "virtual machines as Kubernetes objects",
     "icon": "display",

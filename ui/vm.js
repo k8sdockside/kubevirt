@@ -117,6 +117,7 @@
         }
 
         var facts = el('dl', 'facts-list');
+        var details = sdk.ui.section({ id: 'details', title: 'Details', what: 'the details' });
         fact(facts, 'Size', K.specLine(m) + (m.instancetype ? ' · ' + m.instancetype.name : ''));
         fact(facts, 'Run strategy', m.runStrategy);
         if (!m.vmi) {
@@ -157,27 +158,29 @@
             }
             if (m.running) fact(facts, 'Live migration', m.migratable === 'False' ? 'not possible' + (m.migratableWhy ? ' — ' + m.migratableWhy : '') : 'possible');
         }
-        root.appendChild(facts);
+        details.body.appendChild(facts);
+        root.appendChild(details.root);
 
         var bad = m.conditions.filter(function (c) {
             var good = c.type === 'Failure' || c.type === 'RestartRequired' || c.type === 'Paused' ? c.status !== 'True' : c.status === 'True';
             return c.type && !good && c.type !== 'LiveMigratable' && c.type !== 'AgentConnected';
         });
         if (m.conditions.length) {
+            var conds = sdk.ui.section({ id: 'conditions', title: 'Conditions', count: bad.length ? bad.length + ' of ' + m.conditions.length + ' off' : m.conditions.length, what: 'the conditions' });
             var chips = el('div', 'panel-conds');
-            chips.appendChild(el('span', 'panel-label', 'Conditions'));
             m.conditions.forEach(function (c) {
                 if (!c.type) return;
                 var isBad = bad.indexOf(c) >= 0;
                 var ch = K.chip(c.type + ': ' + c.status, isBad ? 'warn' : 'muted', isBad ? 'alert' : null, c.message || c.reason || '');
                 chips.appendChild(ch);
             });
-            root.appendChild(chips);
+            conds.body.appendChild(chips);
+            root.appendChild(conds.root);
         }
 
         if (m.migrations.length) {
+            var migs = sdk.ui.section({ id: 'migrations', title: 'Migrations', count: m.migrations.length, what: 'the migrations' });
             var ml = el('div', 'panel-migs');
-            ml.appendChild(el('span', 'panel-label', 'Migrations'));
             var ul = el('ul', 'mig-list');
             m.migrations.slice(0, 4).forEach(function (mig) {
                 var li = el('li', mig.failed ? 'error' : mig.inFlight ? 'info' : 'ok');
@@ -194,7 +197,8 @@
                 ul.appendChild(li);
             });
             ml.appendChild(ul);
-            root.appendChild(ml);
+            migs.body.appendChild(ml);
+            root.appendChild(migs.root);
         }
     }
 

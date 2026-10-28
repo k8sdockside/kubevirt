@@ -3008,3 +3008,15 @@ button.th-sort .th-dir {
         padding: 0 14px 30px;
     }
 }
+
+/* Inside a ui.section the heading already says what the block is, and spaces
+   it from the one above: the block's own top margin would double that. */
+.k8sd-section-body > .facts-list,
+.k8sd-section-body > .panel-conds,
+.k8sd-section-body > .panel-migs {
+    margin-top: 0;
+}
+
+.page-section .k8sd-section:first-of-type {
+    margin-top: 12px;
+}
